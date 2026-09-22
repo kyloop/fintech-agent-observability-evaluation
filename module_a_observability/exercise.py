@@ -7,13 +7,13 @@ Segments covered:
   2. LangSmith setup & first traces
   3. Trace anatomy — debugging tool calls, latency, token counts
 """
-
+ 
 import os
 import sys
 from pathlib import Path
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-load_dotenv()
+load_dotenv(find_dotenv())
 
 # ---------------------------------------------------------------------------
 # TODO 1: Enable LangSmith tracing
@@ -44,8 +44,13 @@ from fintech_support_agent import build_support_agent, ask
 # Use build_support_agent() with collection_name="observability_exercise"
 # ---------------------------------------------------------------------------
 # YOUR CODE HERE
-agent = None
-app = None
+agent = build_support_agent(
+    collection_name = "observability_exercise"
+)
+app = agent["app"]
+print(app)
+print("Pipeline ready. All runs will be traced to LangSmith.\n")
+
 
 # ---------------------------------------------------------------------------
 # TODO 3: Run 3 different queries — one for each agent type
@@ -57,6 +62,7 @@ app = None
 #
 # For each, print: intent, response (first 200 chars), retrieved_sources
 # ---------------------------------------------------------------------------
+"""
 print("\n" + "=" * 60)
 print("SEGMENT 2: FIRST TRACES")
 print("=" * 60)
@@ -70,11 +76,14 @@ queries = [
 if app is not None:
     for query in queries:
         print(f"\nQuery: {query}")
-        # YOUR CODE HERE — run the query and print results
-        pass
+        response = ask(app, query)
+        print(f"Response: {response.keys()}")
+        for k, v in response.items():
+            print(f"{k}: {v}")
+        print()
 else:
     print("Complete TODO 2 first.")
-
+"""
 
 # ---------------------------------------------------------------------------
 # TODO 4: Inspect traces in LangSmith
@@ -91,24 +100,22 @@ else:
 # Write your answers as comments below:
 # ---------------------------------------------------------------------------
 
-# Query 1 (Policy):
-#   Agent selected:
-#   Total LLM calls:
-#   Most expensive call tokens:
-#   Total latency:
-#   Retrieved documents:
+# ==============================================================================
 
-# Query 2 (Account):
-#   Agent selected:
-#   Total LLM calls:
-#   Most expensive call tokens:
-#   Total latency:
+# Trace 1
+# Input:   "I need to speak to a manager about fraud on my account!"
+# Output:  "escalation"
+# Tokens:  359 | Latency: 2.05s | Cost: $0.0001056
 
-# Query 3 (Escalation):
-#   Agent selected:
-#   Total LLM calls:
-#   Most expensive call tokens:
-#   Total latency:
+# Trace 2
+# Input:   "What is the balance on ACC-12345?"
+# Output:  {"account_id": "ACC-12345", "name": "Alice Johnson", ...}
+# Tokens:  464 | Latency: 2.10s | Cost: $0.00008490
+
+# Trace 3
+# Input:   "What is the overdraft fee?"
+# Output:  "[account_fees.md] --- ## Overdraft Fees - Overdraft fee: $35 per transaction..."
+# Tokens:  1,001 | Latency: 2.60s | Cost: $0.0001781
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +127,7 @@ else:
 #   - Where in the trace tree does the "not found" response originate?
 #   - How does error information flow through the run tree?
 # ---------------------------------------------------------------------------
+"""
 print("\n" + "=" * 60)
 print("SEGMENT 3: ERROR TRACING")
 print("=" * 60)
@@ -127,15 +135,16 @@ print("=" * 60)
 if app is not None:
     error_query = "What is the balance on ACC-99999?"
     print(f"\nQuery: {error_query}")
-    # YOUR CODE HERE — run the query and inspect the trace
-    pass
+    response = ask(app, error_query)
+    print(f"Response: {response}")
 else:
     print("Complete TODO 2 first.")
-
-# Write your findings:
-#   Supervisor routed to:
-#   Error origin in trace:
-#   Error flow:
+sys.exit()
+"""
+# Input:   "What is the balance on ACC-99999?"
+# Output:  "I couldn't find account ACC-99999 in our system. Please double-check or contact support@securebank.com."
+# Intent:  account_status
+# Tokens:  120 | Latency: 1.16s | Cost: $0.00001890
 
 
 # ---------------------------------------------------------------------------
@@ -147,12 +156,32 @@ else:
 #
 # Then filter by your tag in the LangSmith dashboard.
 # ---------------------------------------------------------------------------
+"""
 print("\n" + "=" * 60)
 print("BONUS: TAGGED RUNS")
 print("=" * 60)
 
+queries = [
+    "What is the overdraft fee?",
+    "What is the balance on ACC-12345?",
+    "I need to speak to a manager about fraud on my account!",
+]
+
 if app is not None:
-    # YOUR CODE HERE — run queries with tags
-    pass
+    for query in queries:
+        print(f"\nQuery: {query}")
+        input = {
+            "query": query,
+            "intent": "",
+            "response": "",
+            "context": "",
+            "retrieved_sources": [],
+        }
+        response = app.invoke(input, config={"tags": ["ex1-tag"]})
+        print(f"Response: {response.keys()}")
+        for k, v in response.items():
+            print(f"{k}: {v}")
+        print()
 else:
     print("Complete TODO 2 first.")
+"""
