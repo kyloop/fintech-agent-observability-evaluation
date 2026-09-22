@@ -20,12 +20,16 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
 from langsmith.evaluation import evaluate
 from langsmith import Client
 
 from eval_dataset import EXERCISE_DATASET_NAME, EVAL_EXAMPLES, ensure_exercise_dataset
 from eval_dataset import EXERCISE_HC_DATASET_NAME, ensure_exercise_hc_dataset
+
+# from eval_dataset import SOLUTION_DATASET_NAME, EVAL_EXAMPLES, ensure_solution_dataset
+# from eval_dataset import SOLUTION_HC_DATASET_NAME, ensure_solution_hc_dataset
+
 
 load_dotenv()
 
@@ -57,10 +61,13 @@ ensure_exercise_dataset()
 # ---------------------------------------------------------------------------
 def run_agent(inputs):
     question = inputs["question"]
-    # YOUR CODE HERE
-    pass
-
-
+    result = ask(app, inputs["question"])
+    return {
+        "answer": result["response"],
+        "intent": result["intent"],
+        "retrieved_sources": result["retrieved_sources"],
+        "context": result["context"],
+    }
 # ---------------------------------------------------------------------------
 # TODO 2: Implement routing accuracy evaluator
 #
@@ -69,9 +76,12 @@ def run_agent(inputs):
 # Return: {"key": "routing_accuracy", "score": float}
 # ---------------------------------------------------------------------------
 def routing_evaluator(run, example):
-    # YOUR CODE HERE
-    pass
-
+    """Check if the supervisor routed to the correct agent."""
+    predicted = run.outputs.get("intent", "")
+    expected = example.outputs.get("intent", "")
+    score = 1.0 if predicted == expected else 0.0
+    print(f"  [Routing] expected={expected}, predicted={predicted}, score={score}")
+    return {"key": "routing_accuracy", "score": score}
 
 # ---------------------------------------------------------------------------
 # TODO 3: Implement LLM-as-judge faithfulness evaluator
@@ -85,14 +95,45 @@ def routing_evaluator(run, example):
 #
 # Hint: Build a ChatPromptTemplate, call judge_llm, parse JSON response.
 # ---------------------------------------------------------------------------
-def faithfulness_evaluator(run, example):
+def faithfulness_evaluator(run, example): 
     answer = run.outputs.get("answer", "")
     context = run.outputs.get("context", "")
     question = example.inputs.get("question", "")
 
-    # YOUR CODE HERE — build prompt, call judge_llm, parse JSON, return score
-    pass
+    if not answer:
+        return {"key": "faithfulness", "score": 0.0}
 
+    FAITHFULNESS_PROMPT = ChatPromptTemplate.from_messages([
+        ("system",
+            "You are an expert evaluator. Assess whether the answer is faithful "
+            "to the provided context.\n\n"
+            "Score 1.0 = fully faithful: every claim is supported by the context\n"
+            "Score 0.5 = partially faithful: some claims are unsupported\n"
+            "Score 0.0 = not faithful: contains claims contradicting or absent from context\n\n"
+            "If the context is empty (escalation response), score 1.0 if the response "
+            "is a general empathetic handoff without specific policy claims, else 0.5.\n\n"
+            'Respond ONLY with JSON: {{"score": <float>, "reason": "<one sentence>"}}'
+        ),
+        ("human",
+            "Context:\n{context}\n\nQuestion: {question}\n\nAnswer to evaluate:\n{answer}"),
+        ])
+
+    messages = FAITHFULNESS_PROMPT.format_messages(
+        context=context[:2000] if context else "(no context — escalation response)",
+        question=question,
+        answer=answer,
+    )
+
+    response = judge_llm.invoke(messages).content.strip()
+
+    try:
+        start, end = response.find("{"), response.rfind("}") + 1
+        parsed = json.loads(response[start:end])
+        score = float(parsed.get("score", 0.5))
+        reason = parsed.get("reason", "")
+        return {"key": "faithfulness", "score": score, "comment": reason}
+    except (json.JSONDecodeError, ValueError):
+        return {"key": "faithfulness", "score": 0.5}
 
 # ---------------------------------------------------------------------------
 # TODO 4: Implement LLM-as-judge correctness evaluator
@@ -108,18 +149,58 @@ def correctness_evaluator(run, example):
     expected = example.outputs.get("answer", "")
     question = example.inputs.get("question", "")
 
-    # YOUR CODE HERE
-    pass
+    if not actual or not expected:
+        return {"key": "correctness", "score": 0.0}
+
+    CORRECTNESS_PROMPT = ChatPromptTemplate.from_messages([
+        ("system",
+            "You are an expert evaluator. Compare the AI's answer to the expected answer.\n\n"
+            "Score 1.0 = all key facts correct\n"
+            "Score 0.5 = partially correct\n"
+            "Score 0.0 = key facts wrong or missing\n\n"
+            "Focus on factual accuracy, not exact wording. "
+            "For escalation responses, check that empathy and contact info are present.\n\n"
+            'Respond ONLY with JSON: {{"score": <float>, "reason": "<one sentence>"}}'
+        ),
+        ("human",
+            "Question: {question}\n\nExpected: {expected}\n\nActual: {actual}"
+        ),
+    ])
+
+    messages = CORRECTNESS_PROMPT.format_messages(
+        question=question, expected=expected, actual=actual
+    )
+
+    response = judge_llm.invoke(messages).content.strip()
+
+    try:
+        start, end = response.find("{"), response.rfind("}") + 1
+        parsed = json.loads(response[start:end])
+        score = float(parsed.get("score", 0.5))
+        reason = parsed.get("reason", "")
+        return {"key": "correctness", "score": score, "comment": reason}
+    except (json.JSONDecodeError, ValueError):
+        return {"key": "correctness", "score": 0.5}
+    
 
 
 # ---------------------------------------------------------------------------
 # TODO 5: Run evaluate() with all evaluators
 # Use data=EXERCISE_DATASET_NAME, experiment_prefix="exercise-eval-student"
 # ---------------------------------------------------------------------------
-# YOUR CODE HERE
+"""
 print("Complete TODOs 1-4, then run evaluate() here.\n")
 
-
+results = evaluate(
+    run_agent,
+    data=EXERCISE_DATASET_NAME,
+    evaluators=[routing_evaluator, faithfulness_evaluator, correctness_evaluator],
+    experiment_prefix="exercise-eval",
+    metadata={"model": "gpt-4o-mini"},
+)
+print(results)
+print("\nEvaluation complete. View results in LangSmith.\n")
+"""
 # ===================================================================
 # SEGMENT 8: MRR (Mean Reciprocal Rank)
 # ===================================================================
@@ -135,6 +216,7 @@ print("Complete TODOs 1-4, then run evaluate() here.\n")
 #
 # MRR = average of all reciprocal ranks
 # ---------------------------------------------------------------------------
+"""
 mrr_queries = [
     # Easy — clearly maps to one document
     {"query": "What credit score do I need for a personal loan?", "relevant_source": "loan_policy.md"},
@@ -158,7 +240,7 @@ mrr_queries = [
 print("=" * 60)
 print("SEGMENT 8: MRR COMPUTATION")
 print("=" * 60)
-
+"""
 # YOUR CODE HERE
 # For each query:
 #   1. docs = retriever.invoke(query["query"])
@@ -166,10 +248,24 @@ print("=" * 60)
 #   3. reciprocal_rank = 1/rank if found, else 0
 #   4. Print query, rank, reciprocal rank
 # Then compute MRR = mean of all reciprocal ranks
+"""
+rr = [] # Reciprocal Rank list
+for idx, query in enumerate(mrr_queries):
+    print(f"idx: {idx}")
+    print(query['query'])
+    print(query['relevant_source'])
+    print()
+    docs_lst = retriever.invoke(query['query'])
+    returned_ranked_doc_lst = [doc.metadata['source'] for doc in docs_lst]
+    print(returned_ranked_doc_lst)
+    ranked_idx = (returned_ranked_doc_lst.index(query['relevant_source']))+1 if query['relevant_source'] in returned_ranked_doc_lst else 0 
+    print(f"ranked_idx: {ranked_idx}")
+    rr.append(1/ranked_idx if ranked_idx >0  else 0)
+print(f"MRR Score: {sum(rr) / len(rr)}")
+
 
 print("Complete TODO 6 to compute MRR.\n")
-
-
+"""
 # ===================================================================
 # SEGMENT 9: DeepEval
 # ===================================================================
@@ -204,10 +300,68 @@ print("=" * 60)
 # Step 2: Create LLMTestCase objects
 # Step 3: Run FaithfulnessMetric, AnswerRelevancyMetric, HallucinationMetric
 # Step 4: Print results
+"""
+from deepeval.test_case import LLMTestCase
+from deepeval.metrics import FaithfulnessMetric
+from deepeval import assert_test
+
+# 1. Define a list of test questions you want to evaluate
+eval_queries = [
+    "What is the overdraft fee?",
+]
+
+test_case_results = []
+
+# 2. Iterate over the string queries properly
+for query in eval_queries:
+    # Get the live response from your FinTech multi-agent system
+    result = ask(app, query)
+    
+    # Establish context fallback structures cleanly
+    ctx = [result["context"]] if result["context"] else ["No context retrieved."]
+    
+    # Construct the dynamic LLMTestCase using the live pipeline outputs
+    dynamic_tc = LLMTestCase(
+        input=query,
+        actual_output=result["response"],
+        retrieval_context=ctx
+    )
+    
+    test_case_results.append({
+        "tc": dynamic_tc,
+        "response": result["response"],
+    })
+
+    # 3. Instantiate your metric with strict penalization turned on
+    faithfulness = FaithfulnessMetric(
+        threshold=0.7, 
+        model="gpt-4o-mini",
+        penalize_ambiguous_claims=True # Catches empty contexts/fabrications correctly!
+    )
+    
+    # Measure the dynamic test case containing the live context
+    faithfulness.measure(dynamic_tc)
+    
+    # 4. Print clean broken down outputs
+    print(f"\n================ QUERY: {query} ================")
+    print(f"Query: {query}")
+    print(f"Agent actual output:  {dynamic_tc.actual_output}")
+    print(f"Final Score:       {faithfulness.score}")
+    print(f"Passed Threshold: {faithfulness.is_successful()}")
+    print(f"Reasoning:        {faithfulness.reason}")  
+
+    print("\n--- Detailed Claims Breakdown ---")
+    for verdict in faithfulness.verdicts:
+        print(f"Verdict classification: {verdict.verdict.upper()}")
+        print(f"Verdict Reason:         {verdict.reason}\n")
+
+
+# print(assert_test(test_case, [faithfulness]))
 
 print("Complete TODO 7 to run DeepEval metrics.\n")
 
-
+sys.exit()
+"""
 # ===================================================================
 # SEGMENT 10: G-Eval
 # ===================================================================
@@ -217,7 +371,7 @@ print("Complete TODO 7 to run DeepEval metrics.\n")
 #
 # from deepeval.metrics import GEval
 # from deepeval.test_case import LLMTestCaseParams
-#
+#b
 # Define a GEval metric with:
 #   name: "Empathy"
 #   criteria: describe what empathetic support looks like
@@ -226,26 +380,66 @@ print("Complete TODO 7 to run DeepEval metrics.\n")
 #
 # Run on escalation test cases (frustrated customer queries).
 # ---------------------------------------------------------------------------
+# ===================================================================
+# SEGMENT 10: G-Eval
+# ===================================================================
+"""
+from deepeval.metrics import GEval
+from deepeval.test_case import LLMTestCaseParams
+from deepeval.test_case import LLMTestCase
+from deepeval.test_case import LLMTestCaseParams, LLMTestCase
+
 print("=" * 60)
 print("SEGMENT 10: G-EVAL (EMPATHY)")
 print("=" * 60)
 
 escalation_queries = [
-    "This is ridiculous! Someone withdrew $15,000 from my savings without my permission!",
+    "This is ridiculous! Someone withdrew \$15,000 from my savings without my permission!",
     "I've been waiting 3 weeks for my fraud dispute to be resolved! This is unacceptable!",
-    # Factual policy question — agent gives a dry/robotic answer with no empathy
     "What is the wire transfer fee?",
 ]
 
-# YOUR CODE HERE
-# Step 1: Run escalation queries through agent
-# Step 2: Create LLMTestCase objects
-# Step 3: Create GEval metric for empathy
-# Step 4: Evaluate and print results
+# 1. Define the G-Eval Empathy Metric as requested in TODO 8
+empathy_metric = GEval(
+    name="Empathy",
+    criteria=(
+        "Assess whether the response shows empathy toward a frustrated customer. "
+        "An empathetic response acknowledges the customer's feelings or problem, "
+        "maintains a supportive and reassuring tone, summarizes the issue briefly, "
+        "and outlines clear next steps or handoff instructions without quoting cold policies."
+    ),
+    evaluation_params=[LLMTestCaseParams.ACTUAL_OUTPUT],
+    threshold=0.7,
+    model="gpt-4o-mini"
+)
+
+for query in escalation_queries:
+    # FIX: Pass the loop variable `query`, NOT the string literal "query"
+    result = ask(app, query)
+
+    ctx = [result["context"]] if result["context"] else ["No context retrieved."]
+
+    # Construct the test case with the live output
+    dynamic_tc = LLMTestCase(
+        input=query,
+        actual_output=result["response"],
+        retrieval_context=ctx
+    )
+
+    # Measure using the empathy metric
+    empathy_metric.measure(dynamic_tc)
+
+    print(f"\n================ QUERY: {query} ================")
+    print(f"Agent actual output: {dynamic_tc.actual_output}")
+    print(f"Empathy Score:       {empathy_metric.score}")
+    print(f"Passed Threshold:    {empathy_metric.is_successful()}")
+    print(f"Reasoning:           {empathy_metric.reason}")
+
 
 print("Complete TODO 8 to run G-Eval empathy metric.")
 
-
+sys.exit()
+"""
 # ===================================================================
 # SEGMENT 11: Dataset Enhancement
 # ===================================================================
@@ -268,27 +462,59 @@ print("Complete TODO 8 to run G-Eval empathy metric.")
 #
 # Hint: Each example needs {"inputs": {"question": ...}, "outputs": {"answer": ..., "intent": ...}}
 # ---------------------------------------------------------------------------
+"""
 print("=" * 60)
 print("SEGMENT 11: DATASET ENHANCEMENT")
 print("=" * 60)
 
 client = Client()
 
-# YOUR CODE HERE
-# new_examples = [
-#     {"inputs": {"question": "..."}, "outputs": {"answer": "...", "intent": "..."}},
-#     ...
-# ]
-# existing = list(client.list_datasets(dataset_name=EXERCISE_DATASET_NAME))
-# if existing:
-#     client.create_examples(
-#         inputs=[e["inputs"] for e in new_examples],
-#         outputs=[e["outputs"] for e in new_examples],
-#         dataset_id=existing[0].id,
-#     )
+# Step 1: Define the 3 new edge-case evaluation examples
+new_examples = [
+    {
+        # a) Multi-part question: Combines personal loan credit score and loan fees
+        "inputs": {"question": "What credit score is needed for a personal loan, and what is the late payment fee if I miss the deadline?"},
+        "outputs": {
+            "answer": "You need a credit score of 620 or higher. The late payment fee is $39 or 5% of the payment amount, whichever is greater, charged after a 15-day grace period.",
+            "intent": "policy",
+        },
+    },
+    {
+        # b) Wrong/misspelled account number format (Tests fallback string logic in Account Agent)
+        "inputs": {"question": "Can you check the balance for my account AC-12345?"},
+        "outputs": {
+            "answer": "I'd be happy to help with your account! Could you please provide your account number? It starts with 'ACC-' followed by digits (e.g., ACC-12345).",
+            "intent": "account_status",
+        },
+    },
+    {
+        # c) Boundary-case policy question: Exact fee waiver threshold limit ($1,500 balance boundary)
+        "inputs": {"question": "If my Premium Checking account balance falls exactly to $1,500, will the monthly fee be waived?"},
+        "outputs": {
+            "answer": "Yes, the $12.99 monthly fee is waived if the daily balance stays above $1,500 or with a direct deposit of $500 or more per month.",
+            "intent": "policy",
+        },
+    },
+]
+
+# Step 2: Look up the destination dataset and push the new evaluation vectors
+existing = list(client.list_datasets(dataset_name=EXERCISE_DATASET_NAME))
+if existing:
+    client.create_examples(
+        inputs=[e["inputs"] for e in new_examples],
+        outputs=[e["outputs"] for e in new_examples],
+        dataset_id=existing[0].id,
+    )
+    # Step 3: Print validation confirmation to standard output
+    print(f"Successfully uploaded {len(new_examples)} edge-case examples to dataset: '{EXERCISE_DATASET_NAME}'")
+else:
+    print(f"Error: Dataset '{EXERCISE_DATASET_NAME}' could not be located in LangSmith. Run ensure_exercise_dataset() first.")
+
 
 print("Complete TODO 9 to add new examples to the dataset.\n")
 
+sys.exit()
+"""
 
 # ===================================================================
 # SEGMENT 12: Hill Climbing
@@ -335,6 +561,8 @@ print("=" * 60)
 
 # --- Create the hill climbing dataset ---
 ensure_exercise_hc_dataset()
+judge_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
 
 # --- Evaluators from the demo (provided) ---
 def routing_evaluator_hc(run, example):
@@ -352,45 +580,90 @@ def keyword_correctness_hc(run, example):
     matches = sum(1 for term in key_terms if term in actual)
     return {"key": "keyword_correctness", "score": round(matches / len(key_terms), 4)}
 
-# --- YOUR CODE: Implement correctness_evaluator ---
 def correctness_evaluator_hc(run, example):
     actual = run.outputs.get("answer", "")
     expected = example.outputs.get("answer", "")
     question = example.inputs.get("question", "")
 
-    # YOUR CODE HERE
+    # Handle edge case if either response value is missing completely
+    if not actual or not expected:
+        return {"key": "correctness", "score": 0.0, "comment": "Missing response text to evaluate."}
+
     # 1. Build a ChatPromptTemplate that asks judge_llm to compare actual vs expected
-    # 2. Score: 1.0 = all key facts correct, 0.5 = partial, 0.0 = wrong
-    # 3. Parse JSON response: {"score": <float>, "reason": "<one sentence>"}
-    # 4. Return: {"key": "correctness", "score": <float>}
-    pass
+    CORRECTNESS_PROMPT = ChatPromptTemplate.from_messages([
+        ("system",
+            "You are an objective evaluation judge. Compare the AI's actual answer to the ground-truth expected answer.\n\n"
+            "Rules:\n"
+            "- Ignore exact wording, formatting, or stylistic variations.\n"
+            "- Focus entirely on factual accuracy and completeness regarding numerical values, criteria, or policy thresholds.\n\n"
+            "Scoring Guide:\n"
+            "Score 1.0 = All key facts, limits, rates, or numbers match the expected answer correctly.\n"
+            "Score 0.5 = The answer is partially correct but misses critical constraints or details.\n"
+            "Score 0.0 = The key facts are flat-out wrong, missing, or contradictory.\n\n"
+            'Respond ONLY with valid JSON inside a codeblock matching this layout: {{"score": <float>, "reason": "<one sentence>"}}'
+        ),
+        ("human",
+            "Customer Question: {question}\n\n"
+            "Expected Ground Truth: {expected}\n\n"
+            "AI Actual Output: {actual}"
+        ),
+    ])
+
+    # Format values into prompt structure
+    messages = CORRECTNESS_PROMPT.format_messages(
+        question=question, expected=expected, actual=actual
+    )
+
+    # 2. Invoke the deterministic judge_llm
+    response = judge_llm.invoke(messages).content.strip()
+
+    # 3. Parse JSON response and safely pull variables out
+    try:
+        start, end = response.find("{"), response.rfind("}") + 1
+        parsed = json.loads(response[start:end])
+        score = float(parsed.get("score", 0.0))
+        reason = parsed.get("reason", "")
+        
+        # 4. Return the standard LangSmith result vector
+        return {"key": "correctness", "score": score, "comment": reason}
+    except (json.JSONDecodeError, ValueError, IndexError):
+        # Fallback security blanket if the LLM output corrupts structural boundaries
+        return {"key": "correctness", "score": 0.0, "comment": "Failed to parse evaluator JSON structure."}
+
 
 # --- YOUR CODE: Build agents and run experiments ---
 # Step 3: Build baseline (chunk_size=200, top_k=1)
-# agent_v1 = build_support_agent(collection_name="hill_climb_v1", chunk_size=200, chunk_overlap=20, top_k=1)
-# app_v1 = agent_v1["app"]
-#
-# def run_agent_v1(inputs):
-#     result = ask(app_v1, inputs["question"])
-#     return {"answer": result["response"], "intent": result["intent"],
-#             "context": result["context"], "retrieved_sources": result["retrieved_sources"]}
+agent_v1 = build_support_agent(collection_name="hill_climb_v1", chunk_size=200, chunk_overlap=20, top_k=1)
+app_v1 = agent_v1["app"]
+
+def run_agent_v1(inputs):
+    result = ask(app_v1, inputs["question"])
+    return {"answer": result["response"], "intent": result["intent"],
+            "context": result["context"], "retrieved_sources": result["retrieved_sources"]}
 #
 # Step 4: Run baseline evaluate()
-# evaluate(run_agent_v1, data=EXERCISE_HC_DATASET_NAME,
-#          evaluators=[routing_evaluator_hc, keyword_correctness_hc, correctness_evaluator_hc],
-#          experiment_prefix="exercise-hc-topk1",
-#          metadata={"chunk_size": 200, "top_k": 1})
+evaluate(run_agent_v1, data=EXERCISE_HC_DATASET_NAME,
+         evaluators=[routing_evaluator_hc, keyword_correctness_hc, correctness_evaluator_hc],
+         experiment_prefix="exercise-hc-topk1",
+         metadata={"chunk_size": 200, "top_k": 1})
 #
 # Step 5: Build improved (chunk_size=200, top_k=5)
-# agent_v2 = build_support_agent(collection_name="hill_climb_v2", chunk_size=200, chunk_overlap=20, top_k=5)
-# app_v2 = agent_v2["app"]
+agent_v2 = build_support_agent(collection_name="hill_climb_v2", chunk_size=200, chunk_overlap=20, top_k=5)
+app_v2 = agent_v2["app"]
 #
-# def run_agent_v2(inputs): ...
+def run_agent_v2(inputs): 
+    result = ask(app_v2, inputs["question"])
+    return {
+        "answer": result["response"], 
+        "intent": result["intent"],
+        "context": result["context"], 
+        "retrieved_sources": result["retrieved_sources"]
+    }
 #
 # Step 6: Run improved evaluate()
-# evaluate(run_agent_v2, data=EXERCISE_HC_DATASET_NAME,
-#          evaluators=[routing_evaluator_hc, keyword_correctness_hc, correctness_evaluator_hc],
-#          experiment_prefix="exercise-hc-topk5",
-#          metadata={"chunk_size": 200, "top_k": 5})
+evaluate(run_agent_v1, data=EXERCISE_HC_DATASET_NAME,
+         evaluators=[routing_evaluator_hc, keyword_correctness_hc, correctness_evaluator_hc],
+         experiment_prefix="exercise-hc-topk5",
+         metadata={"chunk_size": 200, "top_k": 5})
 
 print("Complete TODO 10 to run hill climbing experiment.")
